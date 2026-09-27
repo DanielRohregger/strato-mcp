@@ -1,0 +1,5 @@
+{
+  "accounts": [
+    { "name": "main", "email": "user@example.com", "displayName": "Example User", "allowSend": false }
+  ]
+}
