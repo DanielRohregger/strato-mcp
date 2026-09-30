@@ -26,6 +26,10 @@ reporting an issue that may already be resolved.
 
 ## Security defaults
 
-stratomcp stores passwords in macOS Keychain, disables sending by default, and marks
-mail content as untrusted external data. See the
+stratomcp stores passwords in macOS Keychain, defaults new accounts to enforced
+read-only mailbox access, and marks mail content and external error details as
+untrusted data. Existing accounts retain their legacy permissions until changed
+through setup. Local indexing and approved downloads remain available in read-only
+mode. Permission modes do not replace client-side approval of consequential actions.
+See the
 [README safety model](./README.md#safety-model) for operational guidance.

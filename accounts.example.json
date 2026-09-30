@@ -1,5 +1,5 @@
 {
   "accounts": [
-    { "name": "main", "email": "user@example.com", "displayName": "Example User", "allowSend": false }
+    { "name": "main", "email": "user@example.com", "displayName": "Example User", "accessMode": "read-only", "allowSend": false }
   ]
 }
