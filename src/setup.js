@@ -6,21 +6,22 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  renameSync,
-  writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
-import { CONFIG_PATH, getAccount, getPassword, loadAccounts } from "./config.js";
+import { CONFIG_PATH, getAccount, getPassword, loadAccounts, loadAttachmentDirectory } from "./config.js";
 import { syncIndex } from "./index-db.js";
 import { listFolders } from "./mail.js";
 import {
+  configureAttachmentDirectory,
+  configurePermissions,
   createAccountConfig,
   isSupportedNodeVersion,
   isValidEmail,
   mergeClaudeDesktopConfig,
+  writePrivateJson,
 } from "./setup-helpers.js";
 
 const PROJECT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -32,16 +33,6 @@ const CLAUDE_DESKTOP_CONFIG = join(
   "Claude",
   "claude_desktop_config.json"
 );
-
-function writePrivateJson(path, value) {
-  const directory = dirname(path);
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  chmodSync(directory, 0o700);
-  const temporaryPath = `${path}.tmp-${process.pid}`;
-  writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  renameSync(temporaryPath, path);
-  chmodSync(path, 0o600);
-}
 
 function readJson(path) {
   try {
@@ -144,7 +135,8 @@ async function configureAccounts(terminal) {
 
   const email = await askEmail(terminal);
   const displayName = (await terminal.question("Sender display name (optional): ")).trim();
-  writePrivateJson(CONFIG_PATH, createAccountConfig(email, displayName));
+  const existing = existsSync(CONFIG_PATH) ? readJson(CONFIG_PATH) : {};
+  writePrivateJson(CONFIG_PATH, { ...existing, ...createAccountConfig(email, displayName) });
   console.log(`Saved account settings: ${CONFIG_PATH}`);
 
   storePassword(email);
@@ -158,14 +150,31 @@ async function main() {
   if (!isSupportedNodeVersion(process.versions.node)) {
     throw new Error(`Node.js 22.13 or newer is required; found ${process.versions.node}`);
   }
+  const args = process.argv.slice(2);
+  if (args.length && (args.length !== 1 || args[0] !== "--permissions")) {
+    throw new Error("Usage: npm run setup [-- --permissions]");
+  }
+  const permissionsOnly = args[0] === "--permissions";
 
   console.log("\nstratomcp setup");
   console.log("================\n");
-  console.log("Your password will be stored in macOS Keychain, never in a file.\n");
+  if (!permissionsOnly) console.log("Your password will be stored in macOS Keychain, never in a file.\n");
 
   const terminal = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const accounts = await configureAccounts(terminal);
+    if (permissionsOnly) {
+      await configurePermissions(terminal, CONFIG_PATH);
+      console.log("\nPermissions saved. They apply to subsequent tool calls; operations already in progress are not cancelled.");
+      return;
+    }
+    await configureAccounts(terminal);
+    await configurePermissions(terminal, CONFIG_PATH);
+    const accounts = loadAccounts();
+    await configureAttachmentDirectory(terminal, {
+      configPath: CONFIG_PATH,
+      defaultDirectory: loadAttachmentDirectory(),
+      projectRoot: PROJECT_ROOT,
+    });
 
     for (const account of accounts) {
       console.log(`\nTesting ${account.email}...`);
@@ -198,7 +207,7 @@ async function main() {
 
     console.log("\nSetup complete.");
     console.log("Restart Claude Desktop or open a new Claude Code session, then ask: Which mail folders do I have?");
-    console.log("Sending remains disabled until allowSend is set to true in the account settings.");
+    console.log("Change mailbox permissions later with: npm run setup -- --permissions");
   } finally {
     terminal.close();
   }

@@ -4,12 +4,11 @@ import { convert } from "html-to-text";
 import nodemailer from "nodemailer";
 import MailComposer from "nodemailer/lib/mail-composer/index.js";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, extname, join, resolve } from "node:path";
-import { getPassword } from "./config.js";
+import { basename, extname, join } from "node:path";
+import { assertMailboxPermission, getPassword, loadAttachmentDirectory } from "./config.js";
+import { ToolError } from "./tool-errors.js";
 
 const DEFAULT_MAX_ATTACHMENT_MB = Number(process.env.STRATOMCP_MAX_ATTACHMENT_MB) || 25;
-const DEFAULT_ATTACHMENT_DIR = process.env.STRATOMCP_ATTACHMENT_DIR || join(homedir(), "Downloads", "stratomcp");
 
 export async function withImap(acc, fn) {
   const client = new ImapFlow({
@@ -240,6 +239,7 @@ async function fetchMessage(client, folder, uid, { markSeen, maxChars, offset, s
 // Either uid (single message, thrown error if missing) or uids (1..20, one connection/lock, missing ones reported per-slot).
 export async function getMessage(acc, { folder = "INBOX", uid, uids, markSeen = false, maxChars = 8000, offset = 0, stripQuotes = true }) {
   if ((uid == null) === (uids == null)) throw new Error("Provide exactly one of uid or uids");
+  if (markSeen) assertMailboxPermission(acc, "markSeen");
   const opts = { markSeen, maxChars, offset, stripQuotes };
   if (uids) {
     if (uids.length < 1 || uids.length > 20) throw new Error("uids must contain 1 to 20 entries");
@@ -278,7 +278,12 @@ const TEXTUAL = /^(text\/|application\/(json|xml|csv|x-csv|ics))|\+xml$|\+json$/
 const INLINE_TEXT_CHARS = 30_000;
 
 // Fetches only the selected MIME parts, never the whole message.
-export async function downloadAttachments(acc, { folder = "INBOX", uid, indexes, filenames, dir, maxSizeMB = DEFAULT_MAX_ATTACHMENT_MB }) {
+export async function downloadAttachments(acc, options) {
+  if (Object.hasOwn(options, "dir")) {
+    throw new Error("dir is no longer supported. Choose a download directory during setup or set STRATOMCP_ATTACHMENT_DIR on the server.");
+  }
+  const { folder = "INBOX", uid, indexes, filenames, maxSizeMB = DEFAULT_MAX_ATTACHMENT_MB } = options;
+  const target = loadAttachmentDirectory();
   return withMailbox(acc, folder, async (client) => {
     const msg = await client.fetchOne(String(uid), { uid: true, bodyStructure: true }, { uid: true });
     if (!msg) throw new Error(`Message uid ${uid} not found in ${folder}`);
@@ -292,14 +297,13 @@ export async function downloadAttachments(acc, { folder = "INBOX", uid, indexes,
     if (!wanted.length) throw new Error(`No matching attachments (message has ${all.length})`);
     const total = wanted.reduce((n, a) => n + (a.size || 0), 0);
     if (total > maxSizeMB * 1024 * 1024) {
-      throw new Error(
+      throw new ToolError(
         `Selected attachments total ~${mb(total)}, above the ${maxSizeMB} MB limit. ` +
-          `Confirm with the user, then retry with a higher maxSizeMB or fewer attachments: ` +
-          wanted.map((a) => `#${a.index} ${a.filename} (${mb(a.size)})`).join(", ")
+          "Confirm with the user, then retry with a higher maxSizeMB or fewer attachments.",
+        { attachments: wanted.map(({ index, filename, size }) => ({ index, filename, size })) }
       );
     }
-    const target = resolve(dir || DEFAULT_ATTACHMENT_DIR);
-    mkdirSync(target, { recursive: true });
+    mkdirSync(target, { recursive: true, mode: 0o700 });
     const saved = [];
     for (const a of wanted) {
       const { content } = await client.download(String(msg.uid), a.part, { uid: true });
@@ -325,6 +329,7 @@ export async function downloadAttachments(acc, { folder = "INBOX", uid, indexes,
 }
 
 export async function updateFlags(acc, { folder = "INBOX", uids, seen, flagged }) {
+  assertMailboxPermission(acc, "update_flags");
   return withMailbox(acc, folder, async (client) => {
     const range = uids.join(",");
     const set = (on, flag) =>
@@ -338,6 +343,7 @@ export async function updateFlags(acc, { folder = "INBOX", uids, seen, flagged }
 }
 
 export async function moveMessages(acc, { folder = "INBOX", uids, destination }) {
+  assertMailboxPermission(acc, "move_messages");
   return withMailbox(acc, folder, async (client) => {
     const res = await client.messageMove(uids.join(","), destination, { uid: true });
     if (!res) throw new Error("Move failed");
@@ -354,6 +360,7 @@ function composeMessage(acc, { to, cc, bcc, subject, text, html, inReplyTo, refe
 }
 
 export async function saveDraft(acc, draft) {
+  assertMailboxPermission(acc, "save_draft");
   const raw = await new MailComposer(composeMessage(acc, draft)).compile().build();
   return withImap(acc, async (client) => {
     const drafts = await findSpecialFolder(client, "\\Drafts", ["Drafts", "Entwürfe", "Entwuerfe"]);
@@ -363,7 +370,7 @@ export async function saveDraft(acc, draft) {
 }
 
 export async function sendMessage(acc, mail) {
-  if (!acc.allowSend) throw new Error(`Sending is disabled for account "${acc.name}" (set "allowSend": true in config). Use save_draft instead.`);
+  assertMailboxPermission(acc, "send");
   const transport = nodemailer.createTransport({
     host: acc.smtpHost,
     port: acc.smtpPort,
