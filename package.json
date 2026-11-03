@@ -22,7 +22,7 @@
     "imapflow": "^2.0.6",
     "mailparser": "^3.9.28",
     "nodemailer": "^10.0.10",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "bin": {
     "stratomcp": "src/index.js"
